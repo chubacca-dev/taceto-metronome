@@ -30,13 +30,16 @@ A dumbbell in the main header indicates enabled training options and opens them.
 
 ## Screenshots
 
-| Circle | Pendulum | Meter & beats |
+| Circle | Pendulum | Bar settings |
 | :---: | :---: | :---: |
-| <img src="docs/screenshots/circle.png" alt="Taceto circular hand view with 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/pendulum.png" alt="Taceto pendulum view with 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/meter.png" alt="Time signature dialog with 6/8 selected, BPM reference, subdivision and swing controls" width="230"> |
+| <img src="docs/screenshots/circle.png" alt="Taceto 0.2.0 circle view with training indicator, 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/pendulum.png" alt="Taceto 0.2.0 pendulum view with training indicator and tap tempo" width="230"> | <img src="docs/screenshots/meter.png" alt="Individual 7/8 bar settings with drawn subdivision and swing notation" width="230"> |
 
-Screenshots show the English interface. German is also included.
-These screenshots illustrate the base metronome; the current editor also includes
-the pattern and training features described above.
+| Patterns | Training |
+| :---: | :---: |
+| <img src="docs/screenshots/patterns.png" alt="Named mixed-meter pattern with wrapped bars, three-state beats and individual rhythm settings" width="300"> | <img src="docs/screenshots/training.png" alt="Training controls with automatic tempo increases and estimated duration to the target tempo" width="300"> |
+
+Screenshots show version 0.2.0 in English, including the current pattern editor,
+bar settings and training controls. German is also included.
 
 ## Build
 
@@ -73,7 +76,7 @@ Build an unsigned APK with `./gradlew :app:assembleRelease`, then sign it:
 python3 tools/release.py sign \
   --keystore "$HOME/.local/share/taceto/signing/taceto-release.p12" \
   --apk app/build/outputs/apk/release/app-release-unsigned.apk \
-  --output app/build/outputs/apk/release/taceto-0.1.1.apk \
+   --output app/build/outputs/apk/release/taceto-0.2.0.apk \
   --apksigner "$ANDROID_HOME/build-tools/34.0.0/apksigner"
 ```
 
