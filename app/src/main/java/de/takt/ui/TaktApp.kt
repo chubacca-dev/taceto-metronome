@@ -36,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -46,9 +47,15 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.semantics.Role
@@ -58,6 +65,8 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
@@ -71,6 +80,7 @@ import de.takt.data.SettingsStore
 import de.takt.data.AccentColor
 import java.text.NumberFormat
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.*
 
 private val Mint = Color(0xFFB8F2CB)
@@ -90,6 +100,7 @@ fun TaktApp() {
     val view = remember { store.loadViewPreferences() }
     var pendulum by rememberSaveable { mutableStateOf(view.pendulum) }
     var accentColor by rememberSaveable { mutableStateOf(view.accent) }
+    var visualDelayMs by rememberSaveable { mutableIntStateOf(view.visualDelayMs) }
     val accent = when (accentColor) {
         AccentColor.GREEN -> Mint
         AccentColor.ORANGE -> Color(0xFFFFB86B)
@@ -139,24 +150,35 @@ fun TaktApp() {
                             Text("taceto", fontFamily = brand, fontSize = 22.sp, letterSpacing = .6.sp)
                             Text(".", fontFamily = brand, fontSize = 22.sp, color = accent)
                         }
+                        if (settings.training.omission != Omission.OFF || settings.training.ramp) {
+                            IconButton(onClick = { dialog = "training" }, modifier = Modifier.size(48.dp)
+                                .semantics { contentDescription = context.getString(R.string.training_active) }) {
+                                TrainingIcon(accent)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                        }
                         TextButton(onClick = { dialog = "help" }, modifier = Modifier.size(48.dp).border(1.dp, Paper.copy(alpha = .07f), CircleShape).semantics { contentDescription = context.getString(R.string.open_help) }) { Text("?", color = Muted) }
                         Spacer(Modifier.width(8.dp))
                         TextButton(onClick = { dialog = "settings" }, modifier = Modifier.size(48.dp).border(1.dp, Paper.copy(alpha = .07f), CircleShape).semantics { contentDescription = context.getString(R.string.open_settings) }) { Text("⚙", fontSize = 20.sp, color = Muted) }
                     }
                     state.error?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp).semantics { liveRegion = LiveRegionMode.Polite }) }
                     val heard = state.position
-                    BeatChain(heard?.settings ?: settings, if (state.running) heard?.beatIndex else null) { dialog = "rhythm" }
+                    val hideVisuals = state.running && !settings.training.visuals && settings.training.omission != Omission.OFF
+                    val firstBar = settings.bars.firstOrNull()
+                    val idleSettings = firstBar?.applyTo(settings) ?: settings
+                    BeatChain(if (hideVisuals) idleSettings else heard?.settings ?: idleSettings, if (state.running && !hideVisuals) heard?.beatIndex else null) { dialog = "rhythm" }
                     if (!pendulum) Spacer(Modifier.height(24.dp))
-                    Instrument(settings, heard, state.running, pendulum, reduced, Modifier.size(graphSize), toggle)
+                    Instrument(idleSettings, if (hideVisuals) null else heard, state.running, pendulum, reduced, Modifier.size(graphSize), toggle)
                     Spacer(Modifier.height(8.dp))
-                    Tempo(settings.bpm) { update(settings.copy(bpm = it)) }
+                    Tempo(state.displayedBpm, adjust = { MetronomeController.adjustTempo(it) }) { MetronomeController.setTempo(it) }
                     Spacer(Modifier.height(12.dp))
-                    TapButton(reduced, tapHeight) { update(settings.copy(bpm = it)) }
+                    TapButton(reduced, tapHeight) { MetronomeController.setTempo(it) }
                     Spacer(Modifier.height(16.dp))
                 }
             }
             when (dialog) {
-                "rhythm", "meter", "beats" -> RhythmDialog(settings, rememberedAccents, update) { dialog = null }
+                "rhythm", "meter", "beats", "training" -> PatternDialog(settings, state.position, update,
+                    initialTab = if (dialog == "training") 1 else 0) { dialog = null }
                 "settings" -> Sheet(stringResource(R.string.settings), { dialog = null }) {
                     Text(stringResource(R.string.language), style = MaterialTheme.typography.titleMedium)
                     ChoiceRow(listOf(stringResource(R.string.language_system), stringResource(R.string.language_german), stringResource(R.string.language_english)),
@@ -174,6 +196,19 @@ fun TaktApp() {
                         pendulum = it == 1
                         store.saveViewPreferences(store.loadViewPreferences().copy(pendulum = pendulum))
                     }
+                    Text(stringResource(R.string.audio_timing), style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.visual_delay_value, visualDelayMs))
+                    Slider(visualDelayMs.toFloat(), {
+                        visualDelayMs = (it / 10).roundToInt() * 10
+                        store.saveViewPreferences(store.loadViewPreferences().copy(visualDelayMs = visualDelayMs))
+                        MetronomeController.setVisualDelay(visualDelayMs)
+                    }, valueRange = 0f..1000f, modifier = Modifier.semantics {
+                        contentDescription = context.getString(R.string.visual_delay)
+                    })
+                    TextButton(onClick = { visualDelayMs = 0
+                        store.saveViewPreferences(store.loadViewPreferences().copy(visualDelayMs = 0))
+                        MetronomeController.setVisualDelay(0)
+                    }) { Text(stringResource(R.string.reset)) }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(reduced, { reduced = it; uiStore.edit().putBoolean("reducedMotion", it).apply() })
                         Text(stringResource(R.string.reduced_motion), Modifier.clickable { reduced = !reduced; uiStore.edit().putBoolean("reducedMotion", reduced).apply() }.padding(8.dp))
@@ -212,8 +247,25 @@ fun TaktApp() {
                     Text(stringResource(R.string.help_background))
                     Text(stringResource(R.string.help_reduced))
                     Text(stringResource(R.string.help_sounds))
+                    Text(stringResource(R.string.pattern_training), style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.help_training))
+                    Text(stringResource(R.string.help_training_status))
+                    Text(stringResource(R.string.audio_timing), style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.help_audio_timing))
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun TrainingIcon(color: Color) {
+    Canvas(Modifier.size(26.dp)) {
+        val stroke = size.width * .10f
+        drawLine(color, Offset(size.width * .14f, center.y), Offset(size.width * .86f, center.y), stroke, StrokeCap.Round)
+        listOf(.16f to .30f, .30f to .18f, .70f to .18f, .84f to .30f).forEach { (x, inset) ->
+            drawLine(color, Offset(size.width * x, size.height * inset),
+                Offset(size.width * x, size.height * (1 - inset)), stroke, StrokeCap.Round)
         }
     }
 }
@@ -284,7 +336,7 @@ private fun Instrument(requested: Settings, position: MusicalPosition?, running:
     }
     val effective = position?.settings ?: requested
     // Immediate grid preview for edits; phase and geometry timing always come from the heard position.
-    val preview = effective.copy(subdivision = requested.subdivision, swing = requested.swing, swingEnabled = requested.swingEnabled)
+    val preview = if (requested.bars.isNotEmpty()) effective else effective.copy(subdivision = requested.subdivision, swing = requested.swing, swingEnabled = requested.swingEnabled)
     val grid = remember(preview) { PcmRenderer.buildGrid(preview) }
     val markers = remember(preview, position?.pulseIndex, position?.barIndex, position?.settings) { markerPhases(preview, position, grid) }
     val phase = if (running && !reduced) position?.pulsePhase ?: 0.0 else 0.0
@@ -348,7 +400,7 @@ private fun Instrument(requested: Settings, position: MusicalPosition?, running:
 }
 
 @Composable
-private fun Tempo(bpm: Int, update: (Int) -> Unit) {
+private fun Tempo(bpm: Int, adjust: (Int) -> Unit, update: (Int) -> Unit) {
     val context = LocalContext.current
     val accent = MaterialTheme.colorScheme.primary
     var editing by rememberSaveable { mutableStateOf(false) }
@@ -366,15 +418,14 @@ private fun Tempo(bpm: Int, update: (Int) -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
       val tempoSize = minOf(64f, (maxWidth.value - 104f) / (maxOf(3, bpm.toString().length) * .72f * density.fontScale)).coerceAtLeast(20f).sp
       Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
-        TextButton(onClick = { update((bpm - 1).coerceAtLeast(1)) }, modifier = Modifier.size(48.dp).background(Paper.copy(alpha = .025f), CircleShape).border(1.dp, Paper.copy(alpha = .08f), CircleShape).semantics { contentDescription = context.getString(R.string.tempo_decrease) }) { Text("−", fontSize = 25.sp, color = Muted) }
+        TextButton(onClick = { adjust(-1) }, modifier = Modifier.size(48.dp).background(Paper.copy(alpha = .025f), CircleShape).border(1.dp, Paper.copy(alpha = .08f), CircleShape).semantics { contentDescription = context.getString(R.string.tempo_decrease) }) { Text("−", fontSize = 25.sp, color = Muted) }
         Box(Modifier.weight(1f)
                 .pointerInput(Unit) {
-                    var remainder = 0f
-                    detectVerticalDragGestures(onDragStart = { remainder = 0f; swiping = true },
+                    var drag = TempoDrag(latestBpm)
+                    detectVerticalDragGestures(onDragStart = { drag = TempoDrag(latestBpm); swiping = true },
                         onDragEnd = { swiping = false }, onDragCancel = { swiping = false }) { change, amount ->
-                        change.consume(); remainder -= amount / density.density
-                        val steps = (remainder / 8).toInt()
-                        if (steps != 0) { latestUpdate((latestBpm + steps).coerceIn(1, 999)); remainder -= steps * 8 }
+                        change.consume()
+                        drag.move(amount / density.density)?.let(latestUpdate)
                     }
                 }.clickable(role = Role.Button, onClickLabel = stringResource(R.string.tempo_input)) { text = bpm.toString(); editing = true }
                 .semantics { contentDescription = context.getString(R.string.tempo_description, bpm) }) {
@@ -389,7 +440,7 @@ private fun Tempo(bpm: Int, update: (Int) -> Unit) {
                 drawLine(color, Offset(center.x, size.height * .9f), Offset(right, size.height * .75f), stroke)
             }
         }
-        TextButton(onClick = { update((bpm + 1).coerceAtMost(999)) }, modifier = Modifier.size(48.dp).background(Paper.copy(alpha = .025f), CircleShape).border(1.dp, Paper.copy(alpha = .08f), CircleShape).semantics { contentDescription = context.getString(R.string.tempo_increase) }) { Text("+", fontSize = 25.sp, color = Muted) }
+        TextButton(onClick = { adjust(1) }, modifier = Modifier.size(48.dp).background(Paper.copy(alpha = .025f), CircleShape).border(1.dp, Paper.copy(alpha = .08f), CircleShape).semantics { contentDescription = context.getString(R.string.tempo_increase) }) { Text("+", fontSize = 25.sp, color = Muted) }
       }
     }
     if (editing) {
@@ -399,7 +450,7 @@ private fun Tempo(bpm: Int, update: (Int) -> Unit) {
         fun commit() { if (valid) { update(text.toInt()); focus.clearFocus(); editing = false } }
         AlertDialog(onDismissRequest = { editing = false }, title = { Text(stringResource(R.string.tempo)) }, text = {
             OutlinedTextField(text, { text = it.filter(Char::isDigit).take(3) }, label = { Text(stringResource(R.string.bpm_range)) },
-                modifier = Modifier.focusRequester(requester), singleLine = true, isError = !valid, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                modifier = Modifier.focusRequester(requester).finishOnEnter { commit() }, singleLine = true, isError = !valid, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { commit() }))
         }, confirmButton = { TextButton(onClick = { commit() }, enabled = valid) { Text(stringResource(R.string.apply)) } },
             dismissButton = { TextButton(onClick = { editing = false }) { Text(stringResource(R.string.cancel)) } })
@@ -458,53 +509,367 @@ private fun soundName(sound: Sound, context: Context) = context.getString(when (
 })
 
 @Composable
-private fun MeterControls(settings: Settings, update: (Settings) -> Unit) {
+private fun MeterControls(settings: Settings, pulse: Boolean = true, reference: Boolean = true, update: (Settings) -> Unit) {
     val context = LocalContext.current
     val percent = remember(context.resources.configuration.locales[0]) {
         NumberFormat.getPercentInstance(context.resources.configuration.locales[0]).apply {
             minimumFractionDigits = 1; maximumFractionDigits = 1
         }
     }
-    var numerator by rememberSaveable { mutableStateOf(settings.meter.numerator.toString()) }
-    var denominator by rememberSaveable { mutableStateOf(settings.meter.denominator.toString()) }
-    val n = numerator.toIntOrNull()
-    val d = denominator.toIntOrNull()
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    var numerator by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(settings.meter.numerator.toString())) }
+    var denominator by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(settings.meter.denominator.toString())) }
+    var numeratorFocused by remember { mutableStateOf(false) }
+    var denominatorFocused by remember { mutableStateOf(false) }
+    val n = numerator.text.toIntOrNull()
+    val d = denominator.text.toIntOrNull()
     val valid = n != null && n in 1..1024 && d != null && d in 1..1024 && d and (d - 1) == 0
     fun applyMeter(a: Int, b: Int) { update(settings.copy(meter = Meter(a, b), beats = emptyList())) }
+    fun done() { if (valid) applyMeter(n!!, d!!); focus.clearFocus(); keyboard?.hide() }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ChoiceRow(listOf("4/4", "3/4", "6/8"), listOf(Meter(4, 4), Meter(3, 4), Meter(6, 8)).indexOf(settings.meter)) {
             val m = listOf(Meter(4, 4), Meter(3, 4), Meter(6, 8))[it]
-            numerator = m.numerator.toString(); denominator = m.denominator.toString(); applyMeter(m.numerator, m.denominator)
+            numerator = TextFieldValue(m.numerator.toString()); denominator = TextFieldValue(m.denominator.toString()); applyMeter(m.numerator, m.denominator)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(numerator, { numerator = it.filter(Char::isDigit).take(4) }, label = { Text(stringResource(R.string.numerator)) }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next), modifier = Modifier.weight(1f))
-            OutlinedTextField(denominator, { denominator = it.filter(Char::isDigit).take(4) }, label = { Text(stringResource(R.string.denominator)) }, singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done), modifier = Modifier.weight(1f),
-                keyboardActions = KeyboardActions(onDone = { if (valid) applyMeter(n!!, d!!) }))
+            OutlinedTextField(numerator, { if (it.text.length <= 4 && it.text.all(Char::isDigit)) numerator = it }, label = { Text(stringResource(R.string.numerator)) }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done), modifier = Modifier.weight(1f)
+                    .onFocusChanged { numeratorFocused = it.isFocused; if (it.isFocused) numerator = numerator.copy(selection = TextRange(0, numerator.text.length)) }
+                    .selectNumberOnFirstTap({ numeratorFocused }) { numerator = numerator.copy(selection = TextRange(0, numerator.text.length)) }
+                    .finishOnEnter { done() },
+                keyboardActions = KeyboardActions(onDone = { done() }))
+            OutlinedTextField(denominator, { if (it.text.length <= 4 && it.text.all(Char::isDigit)) denominator = it }, label = { Text(stringResource(R.string.denominator)) }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done), modifier = Modifier.weight(1f)
+                    .onFocusChanged { denominatorFocused = it.isFocused; if (it.isFocused) denominator = denominator.copy(selection = TextRange(0, denominator.text.length)) }
+                    .selectNumberOnFirstTap({ denominatorFocused }) { denominator = denominator.copy(selection = TextRange(0, denominator.text.length)) }
+                    .finishOnEnter { done() },
+                keyboardActions = KeyboardActions(onDone = { done() }))
         }
         if (!valid) Text(stringResource(R.string.meter_validation), color = MaterialTheme.colorScheme.error)
         TextButton(onClick = { applyMeter(n!!, d!!) }, enabled = valid) { Text(stringResource(R.string.apply_meter)) }
-        Text(stringResource(R.string.bpm_reference), style = MaterialTheme.typography.titleMedium)
-        val dotted = listOf(6.0, 3.0, 1.5, .75, .375, .1875).any { abs(it - settings.reference) < 1e-8 }
-        val base = if (dotted) settings.reference / 1.5 else settings.reference
-        val refs = listOf(4.0, 2.0, 1.0, .5, .25, .125)
-        ChoiceRow(refs.map { referenceName(it, context) }, refs.indexOfFirst { abs(it - base) < 1e-8 }) { update(settings.copy(reference = refs[it] * if (dotted) 1.5 else 1.0)) }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(dotted, { update(settings.copy(reference = base * if (it) 1.5 else 1.0)) })
-            Text(stringResource(R.string.dotted))
+        if (pulse) {
+        if (reference) {
+            ReferenceControls(settings, update)
         }
         Text(stringResource(R.string.subdivision), style = MaterialTheme.typography.titleMedium)
-        ChoiceRow(listOf(stringResource(R.string.none), stringResource(R.string.eighths), stringResource(R.string.sixteenths)), settings.subdivision.ordinal) { update(settings.copy(subdivision = Subdivision.entries[it])) }
+        SubdivisionChoices(settings.subdivision) { update(settings.copy(subdivision = it)) }
         val available = settings.subdivision != Subdivision.NONE
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(settings.swingEnabled, { update(settings.copy(swingEnabled = it)) }, enabled = available)
             Text(stringResource(R.string.swing_value, percent.format(settings.swing)))
+            if (available && settings.swingEnabled) SwingGlyph(settings.subdivision == Subdivision.SIXTEENTH,
+                stringResource(if (settings.subdivision == Subdivision.SIXTEENTH) R.string.swing_sixteenth_symbol else R.string.swing_eighth_symbol))
         }
         Slider(settings.swing.toFloat(), { update(settings.copy(swing = (it * 100).roundToInt().coerceIn(50, 75) / 100.0)) },
             valueRange = .5f.. .75f, steps = 24, enabled = available && settings.swingEnabled,
             modifier = Modifier.semantics { contentDescription = context.getString(R.string.swing_amount) })
         TextButton(onClick = { update(settings.copy(swing = 2.0 / 3)) }, enabled = available && settings.swingEnabled) { Text(stringResource(R.string.swing_triplet, percent.format(2.0 / 3))) }
+        }
+    }
+}
+
+/** Apply first-focus selection after TextField's own tap-to-position handling, without consuming it. */
+private fun Modifier.selectNumberOnFirstTap(isFocused: () -> Boolean, selectAll: () -> Unit): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val firstFocus = !isFocused()
+        var change = down
+        do {
+            change = awaitPointerEvent(PointerEventPass.Final).changes.firstOrNull { it.id == down.id } ?: break
+        } while (change.pressed)
+        if (firstFocus && !change.pressed && (change.position - down.position).getDistance() <= viewConfiguration.touchSlop) selectAll()
+    }
+}
+
+/** Consume both hardware key edges; clearing focus on key-down could click a preset on key-up. */
+private fun Modifier.finishOnEnter(done: () -> Unit): Modifier = onPreviewKeyEvent {
+    if (it.key == Key.Enter || it.key == Key.NumPadEnter) {
+        if (it.type == KeyEventType.KeyUp) done()
+        true
+    } else false
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ReferenceControls(settings: Settings, update: (Settings) -> Unit, showTitle: Boolean = true) {
+    val context = LocalContext.current
+    if (showTitle) Text(stringResource(R.string.bpm_reference), style = MaterialTheme.typography.titleMedium)
+    val dotted = listOf(6.0, 3.0, 1.5, .75, .375, .1875).any { abs(it - settings.reference) < 1e-8 }
+    val base = if (dotted) settings.reference / 1.5 else settings.reference
+    val refs = listOf(4.0, 2.0, 1.0, .5, .25, .125)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        refs.forEach { value -> FilterChip(abs(value - base) < 1e-8,
+            onClick = { update(settings.copy(reference = value * if (dotted) 1.5 else 1.0)) },
+            label = { Row(verticalAlignment = Alignment.CenterVertically) {
+                NoteGlyph(value * if (dotted) 1.5 else 1.0)
+                Spacer(Modifier.width(6.dp)); Text(referenceName(value, context))
+            } }) }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(dotted, { update(settings.copy(reference = base * if (it) 1.5 else 1.0)) })
+        Text(stringResource(R.string.dotted))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SubdivisionChoices(selected: Subdivision, choose: (Subdivision) -> Unit) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Subdivision.entries.forEach { value -> FilterChip(selected == value, { choose(value) }, label = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (value != Subdivision.NONE) {
+                    NoteGlyph(if (value == Subdivision.EIGHTH) .5 else .25)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(stringResource(when (value) { Subdivision.NONE -> R.string.none; Subdivision.EIGHTH -> R.string.eighths; Subdivision.SIXTEENTH -> R.string.sixteenths }))
+            }
+        }) }
+    }
+}
+
+@Composable
+private fun NumberSetting(label: String, value: Int, range: IntRange, update: (Int) -> Unit) {
+    val focus = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    var text by remember(value) { mutableStateOf(value.toString()) }
+    OutlinedTextField(text, { input ->
+        text = input.filter(Char::isDigit).take(5)
+        text.toIntOrNull()?.takeIf { it in range }?.let(update)
+    }, label = { Text(label) }, singleLine = true,
+        isError = text.toIntOrNull()?.let { it !in range } ?: true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { focus.clearFocus(); keyboard?.hide() }),
+        modifier = Modifier.fillMaxWidth().finishOnEnter { focus.clearFocus(); keyboard?.hide() })
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PatternDialog(settings: Settings, position: MusicalPosition?, update: (Settings) -> Unit,
+    initialTab: Int = 0, dismiss: () -> Unit) {
+    val context = LocalContext.current
+    val store = remember { SettingsStore(context) }
+    var tab by rememberSaveable { mutableIntStateOf(initialTab) }
+    val feedback = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    fun notify(message: String) {
+        feedback.currentSnackbarData?.dismiss()
+        scope.launch { feedback.showSnackbar(message, withDismissAction = true) }
+    }
+    var selected by rememberSaveable { mutableIntStateOf(0) }
+    var name by rememberSaveable { mutableStateOf(store.currentPatternName()) }
+    var standardTempo by rememberSaveable { mutableIntStateOf(store.defaultTempo(settings.bpm)) }
+    LaunchedEffect(name, standardTempo) { store.rememberPattern(name, standardTempo) }
+    var library by remember { mutableStateOf(false) }
+    var revision by remember { mutableIntStateOf(0) }
+    var adding by remember { mutableStateOf(false) }
+    var editingBar by remember { mutableStateOf(false) }
+    var editingReference by remember { mutableStateOf(false) }
+    var count by remember { mutableIntStateOf(1) }
+    var newMeter by remember { mutableStateOf(Settings()) }
+    val bars = settings.bars.ifEmpty { listOf(PatternBar(settings.meter, settings.beats)) }
+    val index = selected.coerceIn(bars.indices)
+    val bar = bars[index]
+    fun replace(values: List<PatternBar>) { update(settings.copy(bars = values)); selected = selected.coerceIn(values.indices) }
+    androidx.compose.ui.window.Dialog(onDismissRequest = dismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        val focus = LocalFocusManager.current
+        val keyboard = LocalSoftwareKeyboardController.current
+        fun finishInput() { focus.clearFocus(); keyboard?.hide() }
+        Surface(Modifier.fillMaxWidth().fillMaxHeight(.94f).imePadding().padding(8.dp), shape = RoundedCornerShape(20.dp)) {
+          Box(Modifier.fillMaxSize()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.pattern_training), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    TextButton(onClick = dismiss) { Text(stringResource(R.string.close)) }
+                }
+                ChoiceRow(listOf(stringResource(R.string.pattern), stringResource(R.string.training)), tab) { tab = it }
+                Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (tab == 0) {
+                        OutlinedTextField(name, { name = it.take(80) }, label = { Text(stringResource(R.string.pattern_name)) }, modifier = Modifier.fillMaxWidth().finishOnEnter { finishInput() },
+                            singleLine = true, keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { finishInput() }))
+                        FlowRow {
+                            TextButton(onClick = { finishInput(); library = true }) { PatternActionIcon("load"); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.load_pattern)) }
+                            TextButton(onClick = {
+                                finishInput()
+                                val savedName = name.trim()
+                                store.savePattern(savedName, settings.copy(bpm = standardTempo)); name = savedName; revision++
+                                notify(context.getString(R.string.pattern_saved, savedName))
+                            }, enabled = name.isNotBlank()) { PatternActionIcon("save"); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.save_pattern)) }
+                            TextButton(onClick = { finishInput(); name = ""; standardTempo = settings.bpm; selected = 0; update(settings.copy(bars = listOf(PatternBar()))) }) { PatternActionIcon("new"); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.new_pattern)) }
+                        }
+                        NumberSetting(stringResource(R.string.standard_tempo), standardTempo, 1..999) { standardTempo = it }
+                        TextButton(onClick = { editingReference = true }) {
+                            Text("${stringResource(R.string.bpm_reference)}: "); NoteGlyph(settings.reference)
+                            Spacer(Modifier.width(6.dp)); Text(referenceName(settings.reference, context))
+                        }
+                        PatternGrid(bars, settings, index, position,
+                            select = { selected = it },
+                            open = { selected = it; editingBar = true }, change = { i, value ->
+                                selected = i; replace(bars.toMutableList().also { it[i] = value })
+                            })
+                        TextButton(onClick = { adding = true }) { Text(stringResource(R.string.add_bars)) }
+                        Row(Modifier.horizontalScroll(rememberScrollState())) {
+                            TextButton(onClick = { replace(bars.toMutableList().also { it.add(index + 1, bar) }); selected = index + 1 }) { Text(stringResource(R.string.duplicate_bar)) }
+                            TextButton(onClick = { replace(bars.toMutableList().also { it[index] = it[index - 1]; it[index - 1] = bar }); selected = index - 1 }, enabled = index > 0) { Text("←") }
+                            TextButton(onClick = { replace(bars.toMutableList().also { it[index] = it[index + 1]; it[index + 1] = bar }); selected = index + 1 }, enabled = index < bars.lastIndex) { Text("→") }
+                            TextButton(onClick = { replace(bars.toMutableList().also { it.removeAt(index) }) }, enabled = bars.size > 1) { Text(stringResource(R.string.delete_pattern)) }
+                        }
+                    } else {
+                        val t = settings.training
+                        fun train(value: Training) { update(settings.copy(training = value)) }
+                        Text(stringResource(R.string.omissions), style = MaterialTheme.typography.titleMedium)
+                        ChoiceRow(listOf(stringResource(R.string.none), stringResource(R.string.single_beats), stringResource(R.string.whole_bars)), t.omission.ordinal) { train(t.copy(omission = Omission.entries[it])) }
+                        if (t.omission != Omission.OFF) {
+                            Text(stringResource(R.string.probability, t.probability))
+                            Slider(t.probability.toFloat(), { train(t.copy(probability = it.roundToInt())) }, valueRange = 0f..100f)
+                            if (t.omission == Omission.BARS) NumberSetting(stringResource(R.string.max_silent_bars), t.maxSilentBars, 1..100) { train(t.copy(maxSilentBars = it)) }
+                            Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(t.visuals, { train(t.copy(visuals = it)) }); Text(stringResource(R.string.training_visuals)) }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(t.ramp, { train(t.copy(ramp = it, startBpm = settings.bpm, targetBpm = maxOf(settings.bpm, t.targetBpm))) }); Text(stringResource(R.string.tempo_ramp)) }
+                        if (t.ramp) {
+                            NumberSetting(stringResource(R.string.start_tempo), t.startBpm, 1..999) { train(t.copy(startBpm = it, targetBpm = maxOf(it, t.targetBpm))) }
+                            NumberSetting(stringResource(R.string.tempo_step), t.step, 1..999) { train(t.copy(step = it)) }
+                            NumberSetting(stringResource(R.string.interval_seconds), t.intervalSeconds, 1..86400) { train(t.copy(intervalSeconds = it)) }
+                            NumberSetting(stringResource(R.string.target_tempo), t.targetBpm, t.startBpm..999) { train(t.copy(targetBpm = it)) }
+                            val duration = remember(t, settings.bars, settings.meter, settings.reference) { trainingDurationSeconds(settings) / 60.0 }
+                            val minutes = NumberFormat.getNumberInstance(context.resources.configuration.locales[0]).apply { maximumFractionDigits = 1 }
+                            Text(stringResource(R.string.training_duration, minutes.format(duration)))
+                            Text(stringResource(R.string.current_tempo, position?.settings?.bpm ?: t.startBpm))
+                        }
+                    }
+                }
+            }
+            SnackbarHost(feedback, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+          }
+        }
+    }
+    if (library) Sheet(stringResource(R.string.load_pattern), { library = false }) {
+        val names = remember(revision) { store.patternNames() }
+        if (names.isEmpty()) Text(stringResource(R.string.no_saved_patterns))
+        names.forEach { saved -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = {
+                val loaded = store.loadPattern(saved); name = saved; standardTempo = loaded.bpm
+                selected = 0; update(loaded); library = false
+                notify(context.getString(R.string.pattern_loaded, saved))
+            }, modifier = Modifier.weight(1f)) { Text(saved) }
+            TextButton(onClick = { store.deletePattern(saved); revision++ }) { Text(stringResource(R.string.delete_pattern)) }
+        } }
+    }
+    if (adding) Sheet(stringResource(R.string.add_bars), { adding = false }) {
+        NumberSetting(stringResource(R.string.bar_count), count, 1..128) { count = it }
+        MeterControls(newMeter, pulse = false) { newMeter = it }
+        TextButton(onClick = { replace(bars + List(count) { PatternBar(newMeter.meter, subdivision = settings.subdivision,
+            swingEnabled = settings.swingEnabled, swing = settings.swing) }); selected = bars.size; adding = false }) { Text(stringResource(R.string.add_bars)) }
+    }
+    if (editingBar) Sheet(stringResource(R.string.selected_bar, index + 1), { editingBar = false }) {
+        key(index) {
+            MeterControls(bar.applyTo(settings), reference = false) { changed ->
+                replace(bars.toMutableList().also { it[index] = PatternBar(changed.meter, changed.beats,
+                    changed.subdivision, changed.swingEnabled, changed.swing) })
+            }
+        }
+    }
+    if (editingReference) Sheet(stringResource(R.string.bpm_reference), { editingReference = false }) {
+        ReferenceControls(settings, update, showTitle = false)
+    }
+}
+
+@Composable
+private fun PatternActionIcon(action: String) {
+    val color = LocalContentColor.current
+    Canvas(Modifier.size(18.dp)) {
+        val unit = size.width / 24f
+        val path = Path()
+        when (action) {
+            "load" -> { path.moveTo(3*unit, 7*unit); path.lineTo(10*unit, 7*unit); path.lineTo(12*unit, 10*unit)
+                path.lineTo(21*unit, 10*unit); path.lineTo(21*unit, 20*unit); path.lineTo(3*unit, 20*unit); path.close() }
+            "save" -> { path.moveTo(4*unit, 3*unit); path.lineTo(17*unit, 3*unit); path.lineTo(21*unit, 7*unit)
+                path.lineTo(21*unit, 21*unit); path.lineTo(4*unit, 21*unit); path.close()
+                path.moveTo(8*unit, 3*unit); path.lineTo(8*unit, 9*unit); path.lineTo(16*unit, 9*unit); path.lineTo(16*unit, 3*unit)
+                path.moveTo(8*unit, 21*unit); path.lineTo(8*unit, 14*unit); path.lineTo(17*unit, 14*unit); path.lineTo(17*unit, 21*unit) }
+            else -> { path.moveTo(12*unit, 4*unit); path.lineTo(12*unit, 20*unit)
+                path.moveTo(4*unit, 12*unit); path.lineTo(20*unit, 12*unit) }
+        }
+        drawPath(path, color, style = Stroke(1.8f*unit, cap = StrokeCap.Round))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PatternGrid(bars: List<PatternBar>, settings: Settings, selected: Int, position: MusicalPosition?,
+    select: (Int) -> Unit, open: (Int) -> Unit, change: (Int, PatternBar) -> Unit) {
+    val context = LocalContext.current
+    val fontScale = LocalDensity.current.fontScale.coerceAtLeast(1f)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val beatWidth = 36.dp * fontScale
+        val rows = patternRows(bars.map { it.meter.numerator }, maxWidth.value, beatWidth.value)
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            rows.forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    row.forEach { i ->
+                        val bar = bars[i]
+                        val local = bar.applyTo(settings)
+                        val states = local.effectiveBeats
+                        val accent = MaterialTheme.colorScheme.primary
+                        Column(Modifier.weight(1f).border(1.dp, if (selected == i) accent else Edge,
+                            RoundedCornerShape(10.dp)).background(Panel, RoundedCornerShape(10.dp))
+                             .clickable(role = Role.Button, onClickLabel = stringResource(R.string.select_bar)) { select(i) }.padding(8.dp)) {
+                            Row(Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                                verticalAlignment = Alignment.CenterVertically) {
+                                Text("${i + 1} · ${bar.meter.numerator}/${bar.meter.denominator}", Modifier.weight(1f), color = accent)
+                                IconButton(onClick = { open(i) }, modifier = Modifier.size(48.dp)
+                                    .semantics { contentDescription = context.getString(R.string.edit_bar_number, i + 1) }) {
+                                    Text("⚙", color = Muted)
+                                }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                              if (local.subdivision != Subdivision.NONE) {
+                                CompositionLocalProvider(LocalContentColor provides Muted) { NoteGlyph(if (local.subdivision == Subdivision.EIGHTH) .5 else .25) }
+                                Spacer(Modifier.width(4.dp))
+                              }
+                              Text(stringResource(R.string.bar_subdivision, stringResource(when (local.subdivision) {
+                                Subdivision.NONE -> R.string.none
+                                Subdivision.EIGHTH -> R.string.eighths
+                                Subdivision.SIXTEENTH -> R.string.sixteenths
+                              })), style = MaterialTheme.typography.labelSmall, color = Muted)
+                            }
+                            val swingActive = local.swingEnabled && local.subdivision != Subdivision.NONE
+                            val percent = remember(context.resources.configuration.locales[0]) {
+                                NumberFormat.getPercentInstance(context.resources.configuration.locales[0]).apply { maximumFractionDigits = 1 }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                              Text(if (swingActive) stringResource(R.string.bar_swing_on, percent.format(local.swing))
+                                else stringResource(R.string.bar_swing_off), style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.weight(1f), color = if (swingActive) accent else Muted)
+                              if (swingActive) CompositionLocalProvider(LocalContentColor provides accent) {
+                                SwingGlyph(local.subdivision == Subdivision.SIXTEENTH,
+                                    stringResource(if (local.subdivision == Subdivision.SIXTEENTH) R.string.swing_sixteenth_symbol else R.string.swing_eighth_symbol))
+                              }
+                            }
+                            FlowRow(maxItemsInEachRow = Int.MAX_VALUE) {
+                                states.forEachIndexed { beat, state ->
+                                    val label = stringResource(when (state) { BeatState.NORMAL -> R.string.on; BeatState.ACCENT -> R.string.accented; BeatState.MUTED -> R.string.beat_off })
+                                    val current = position?.patternBarIndex == i && position.beatIndex == beat
+                                    Column(Modifier.width(beatWidth).heightIn(min = 60.dp)
+                                        .background(if (current) accent.copy(alpha = .18f) else Color.Transparent, RoundedCornerShape(6.dp))
+                                        .clickable(role = Role.Button) { val values = states.toMutableList()
+                                            values[beat] = when (state) { BeatState.NORMAL -> BeatState.ACCENT; BeatState.ACCENT -> BeatState.MUTED; BeatState.MUTED -> BeatState.NORMAL }
+                                            change(i, bar.copy(beats = values))
+                                        }.semantics { contentDescription = context.getString(R.string.pattern_beat_state, i + 1, beat + 1, label) },
+                                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                                        Text((beat + 1).toString(), style = MaterialTheme.typography.labelSmall, color = Muted)
+                                        Text(when(state) { BeatState.ACCENT -> "◆"; BeatState.NORMAL -> "●"; BeatState.MUTED -> "○" },
+                                            color = if (state == BeatState.MUTED) Muted else accent, fontSize = 20.sp)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -515,7 +880,7 @@ private fun RhythmDialog(settings: Settings, previous: MutableMap<Int, BeatState
         Column(Modifier.fillMaxWidth().imePadding(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ChoiceRow(listOf(stringResource(R.string.meter_pulse), stringResource(R.string.beats)), section) { section = it }
             if (section == 0) Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                MeterControls(settings, update)
+                MeterControls(settings, update = update)
             } else BeatControls(settings, previous, update)
         }
     }, confirmButton = { TextButton(onClick = dismiss) { Text(stringResource(R.string.close)) } })
