@@ -20,9 +20,12 @@ internal class AudioEngine(
     private val preview: Boolean = false,
     private val onPosition: (MusicalPosition) -> Unit,
     private val onFinished: (Throwable?) -> Unit,
+    visualDelayMs: Int = 0,
 ) {
+    @Volatile private var visualDelay = visualDelayMs.coerceIn(0, 1000)
     @Volatile private var requested = initial.copy(beats = initial.beats.toList(), pitches = initial.pitches.toMap())
     @Volatile private var stopped = false
+    @Volatile private var rampCancellation = 0L
     private lateinit var bank: SoundBank
     private val thread = Thread({ runAudio() }, "Taceto-audio")
     private val preparation = Thread({
@@ -35,6 +38,8 @@ internal class AudioEngine(
     }, "Taceto-sound-loader")
 
     fun start() = preparation.start()
+    fun setVisualDelay(milliseconds: Int) { visualDelay = milliseconds.coerceIn(0, 1000) }
+    fun cancelTempoRamp() { rampCancellation++ }
     fun update(settings: Settings) { requested = settings.copy(beats = settings.beats.toList(), pitches = settings.pitches.toMap()) }
     fun stop() { stopped = true; preparation.interrupt(); thread.interrupt() }
 
@@ -76,6 +81,7 @@ internal class AudioEngine(
             val stream = PrimedAudioStream(rate, requested, bank)
             val renderer = stream.renderer
             var applied = requested
+            var appliedCancellation = 0L
             val block = FloatArray(blockFrames)
             val timestamp = AudioTimestamp()
             val head = PlaybackHead()
@@ -107,7 +113,7 @@ internal class AudioEngine(
                 }
                 heard = max(heard, min(written, observed))
                 if (now - lastReport >= 16_000_000L && written > 0) {
-                    stream.positionAt(heard)?.let(onPosition)
+                    stream.positionAt(visualPlaybackFrame(heard, rate, visualDelay))?.let(onPosition)
                     lastReport = now
                 }
                 if (renderer.renderedFrames > 0 && now - lastPrune >= 1_000_000_000L) {
@@ -120,6 +126,10 @@ internal class AudioEngine(
                 if (requested != applied) {
                     applied = requested
                     renderer.submitSettings(applied)
+                }
+                if (rampCancellation != appliedCancellation) {
+                    appliedCancellation = rampCancellation
+                    renderer.cancelTempoRamp()
                 }
                 val available = (queueLimit - (written - rawHead).coerceAtLeast(0)).toInt()
                 if (available > 0 && (!preview || written < previewEnd)) {
@@ -159,6 +169,21 @@ internal class AudioEngine(
                 runCatching { it.release() }
             }
             onFinished(failure)
+        }
+    }
+
+    companion object {
+        private val prewarming = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun prewarm() {
+            if (!prewarming.compareAndSet(false, true)) return
+            Thread({
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                    val rate = AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
+                        .takeIf { it in 8000..192000 } ?: 48000
+                    SoundBank.prepare(rate)
+                } catch (error: Exception) { Log.w("TacetoAudio", "Sound prewarming failed; playback will retry", error) }
+            }, "Taceto-sound-prewarm").start()
         }
     }
 }

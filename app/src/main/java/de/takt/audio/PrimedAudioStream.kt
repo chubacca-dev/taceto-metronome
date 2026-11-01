@@ -6,8 +6,9 @@ import de.takt.core.SoundBank
 import kotlin.math.min
 
 /** Gives the output route time to settle before musical frame zero, without changing its gain. */
-internal class PrimedAudioStream(sampleRate: Int, initial: Settings, bank: SoundBank) {
-    val warmupFrames = sampleRate * 180L / 1000
+internal class PrimedAudioStream(sampleRate: Int, initial: Settings, bank: SoundBank, warmupMillis: Int = 40) {
+    init { require(warmupMillis in 0..1000) }
+    val warmupFrames = sampleRate * warmupMillis.toLong() / 1000
     val renderer = PcmRenderer(sampleRate, initial, soundBank = bank)
     private var outputFrames = 0L
 
@@ -24,3 +25,7 @@ internal class PrimedAudioStream(sampleRate: Int, initial: Settings, bank: Sound
     fun positionAt(deviceFrame: Long) = if (deviceFrame < warmupFrames || renderer.renderedFrames == 0L) null
         else renderer.positionAt(musicalFrame(deviceFrame).coerceAtMost(renderer.renderedFrames))
 }
+
+/** Display-only route calibration; musical output and its clock never change. */
+internal fun visualPlaybackFrame(heardFrame: Long, sampleRate: Int, delayMs: Int): Long =
+    (heardFrame - sampleRate * delayMs.coerceIn(0, 1000).toLong() / 1000).coerceAtLeast(0)

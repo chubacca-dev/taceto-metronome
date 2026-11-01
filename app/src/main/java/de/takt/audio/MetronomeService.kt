@@ -20,6 +20,8 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.graphics.drawable.Icon
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.util.Log
 import de.takt.AppLanguage
 import de.takt.R
@@ -31,6 +33,13 @@ class MetronomeService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var receiverRegistered = false
     private lateinit var mediaSession: MediaSession
+    private val mediaArtwork by lazy {
+        Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888).also { bitmap ->
+            requireNotNull(getDrawable(R.drawable.ic_launcher)).apply {
+                setBounds(0, 0, bitmap.width, bitmap.height); draw(Canvas(bitmap))
+            }
+        }
+    }
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) stopPlayback()
@@ -137,7 +146,8 @@ class MetronomeService : Service() {
             Intent(this, MetronomeService::class.java).setAction(ACTION_START),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val builder = Notification.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_media_play).setContentTitle(localized.getString(R.string.app_name))
+            .setSmallIcon(R.drawable.ic_notification).setLargeIcon(mediaArtwork)
+            .setContentTitle(localized.getString(R.string.app_name))
             .setContentText(localized.getString(if (running) R.string.metronome_running else R.string.metronome_stopped))
             .setOngoing(running).setOnlyAlertOnce(true)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -163,6 +173,9 @@ class MetronomeService : Service() {
     private fun updateMediaState(running: Boolean) {
         val localized = AppLanguage.localizedContext(this)
         mediaSession.setMetadata(MediaMetadata.Builder()
+            .putBitmap(MediaMetadata.METADATA_KEY_ART, mediaArtwork)
+            .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, mediaArtwork)
+            .putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, mediaArtwork)
             .putString(MediaMetadata.METADATA_KEY_TITLE, localized.getString(R.string.app_name))
             .putString(MediaMetadata.METADATA_KEY_ARTIST, localized.getString(
                 if (running) R.string.metronome_running else R.string.metronome_stopped)).build())

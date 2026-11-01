@@ -24,7 +24,12 @@ data class PlaybackState(
     val position: MusicalPosition? = null,
     val pending: Boolean = false,
     val error: Int? = null,
-)
+    val manualTempo: Boolean = false,
+) {
+    /** Manual controls acknowledge the requested value immediately, never the delayed audio echo. */
+    val displayedBpm: Int get() = if (running && settings.training.ramp && !manualTempo)
+        position?.settings?.bpm ?: settings.training.startBpm else settings.bpm
+}
 
 /** Public UI entry point. All mutations are serialized on Android's main thread. */
 object MetronomeController {
@@ -45,6 +50,7 @@ object MetronomeController {
         if (store == null) {
             store = SettingsStore(context)
             mutableState.value = mutableState.value.copy(settings = store!!.load())
+            AudioEngine.prewarm()
         }
     }
 
@@ -54,10 +60,21 @@ object MetronomeController {
             store?.save(snapshot)
             val current = mutableState.value
             mutableState.value = current.copy(settings = snapshot,
-                pending = current.running && current.position?.settings != snapshot, error = null)
+                pending = current.running && current.position?.settings != snapshot, error = null,
+                manualTempo = current.running && snapshot.training == current.settings.training &&
+                    (current.manualTempo || snapshot.bpm != current.settings.bpm))
             if (current.running) engine?.update(snapshot)
         }
     }
+    fun setTempo(bpm: Int) = serialized {
+        update(mutableState.value.settings.copy(bpm = bpm))
+        mutableState.value = mutableState.value.copy(manualTempo = mutableState.value.running)
+        engine?.cancelTempoRamp()
+    }
+    fun adjustTempo(delta: Int) = serialized {
+        setTempo((mutableState.value.displayedBpm + delta).coerceIn(1, 999))
+    }
+    fun setVisualDelay(milliseconds: Int) = serialized { engine?.setVisualDelay(milliseconds) }
 
     fun start(context: Context) = serialized {
         initialize(context)
@@ -99,7 +116,8 @@ object MetronomeController {
         startRequested = false
         if (mutableState.value.running) return
         stopEngine()
-        mutableState.value = mutableState.value.copy(running = true, position = null, pending = false, error = null)
+        mutableState.value = mutableState.value.copy(running = true, position = null, pending = false,
+            error = null, manualTempo = false)
         launchEngine(mutableState.value.settings, false, onFinished)
     }
 
@@ -108,6 +126,7 @@ object MetronomeController {
             (intent.getLongExtra("commandId", -1) == commandId && startRequested)
 
     private fun launchEngine(settings: Settings, preview: Boolean, onFinished: () -> Unit = {}) {
+        val view = store?.loadViewPreferences()
         val token = ++generation
         // At most one UI-position delivery is queued, even while the main thread is busy.
         val latestPosition = AtomicReference<MusicalPosition?>(null)
@@ -132,13 +151,13 @@ object MetronomeController {
                     onFinished()
                 }
             }
-        }).also { it.start() }
+        }, visualDelayMs = view?.visualDelayMs ?: 0).also { it.start() }
     }
 
     internal fun stopEngine() {
         generation++
         engine?.stop(); engine = null
-        mutableState.value = mutableState.value.copy(running = false, position = null, pending = false)
+        mutableState.value = mutableState.value.copy(running = false, position = null, pending = false, manualTempo = false)
     }
 
     internal fun fail(message: Int) {

@@ -5,6 +5,25 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PrimedAudioStreamTest {
+    @org.junit.Test fun visualCalibrationShiftsDisplayOnlyAndClampsAtStart() {
+        org.junit.Assert.assertEquals(24000L, visualPlaybackFrame(48000, 48000, 500))
+        org.junit.Assert.assertEquals(0L, visualPlaybackFrame(1000, 48000, 500))
+        org.junit.Assert.assertEquals(48000L, visualPlaybackFrame(48000, 48000, 0))
+    }
+
+    @org.junit.Test fun fastPrerollStartsEarlierWithoutChangingMusicalEventsOrPcmGain() {
+        val rate = 48000
+        val bank = de.takt.core.SoundBank.prepare(rate)
+        val fast = PrimedAudioStream(rate, de.takt.core.Settings(), bank)
+        val stable = PrimedAudioStream(rate, de.takt.core.Settings(), bank, 180)
+        val a = FloatArray(12000); val b = FloatArray(12000)
+        fast.render(a, a.size); stable.render(b, b.size)
+        org.junit.Assert.assertEquals(1920L, fast.warmupFrames)
+        org.junit.Assert.assertEquals(8640L, stable.warmupFrames)
+        val size = 3000
+        org.junit.Assert.assertArrayEquals(b.copyOfRange(8640, 8640 + size), a.copyOfRange(1920, 1920 + size), 0f)
+        org.junit.Assert.assertEquals(0L, fast.positionAt(1920)!!.frame)
+    }
     @Test fun startupSilencePreservesEverySampleAndFirstAccentGainForAllSounds() {
         val rate = 48000
         val bank = SoundBank.prepare(rate)
