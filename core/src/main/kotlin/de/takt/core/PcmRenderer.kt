@@ -4,11 +4,12 @@ import kotlin.math.*
 
 /** Single continuous musical clock; integer frames are rounded only at the output boundary. */
 class PcmRenderer(val sampleRate: Int, initialSettings: Settings = Settings(),
-    pattern: List<PatternBar>? = null, private val soundBank: SoundBank = SoundBank.prepare(sampleRate)) {
+    pattern: List<PatternBar>? = null, private val soundBank: SoundBank = SoundBank.prepare(sampleRate),
+    randomSeed: Long = System.nanoTime()) {
     init { require(sampleRate in 8000..384000 && soundBank.sampleRate == sampleRate) }
     private var active = initialSettings.snapshot()
     private var requested = active
-    private var pattern = snapshotPattern(pattern)
+    private var pattern = snapshotPattern(pattern ?: initialSettings.bars.takeIf { it.isNotEmpty() })
     private var requestedPattern = this.pattern
     private var patternBarIndex = -1
     private var loopIndex = -1L
@@ -29,12 +30,29 @@ class PcmRenderer(val sampleRate: Int, initialSettings: Settings = Settings(),
     private val events = mutableListOf<ClickEvent>()
     private data class Segment(val frame: Double, val q: Double, val barStart: Double,
         val bar: Long, val pulseStart: Double, val pulse: Long, val settings: Settings,
-        val patternBar: Int, val loop: Long)
+        val patternBar: Int, val loop: Long, val muted: Boolean)
     private val segments = mutableListOf<Segment>()
     private data class Voice(val frame: Long, val samples: FloatArray)
     private val voices = mutableListOf<Voice>()
+    private val random = kotlin.random.Random(randomSeed)
+    private var silentBars = 0
+    private var barMuted = false
+    private var pulseMuted = false
+    private var rampCancelled = false
+    private var nextRampFrame = initialSettings.training.intervalSeconds.toDouble() * sampleRate
+    private var rampBpm = if (initialSettings.training.ramp) initialSettings.training.startBpm else initialSettings.bpm
 
-    @Synchronized fun submitSettings(settings: Settings) { requested = settings.snapshot() }
+    @Synchronized fun submitSettings(settings: Settings) {
+        if (settings.bpm != requested.bpm) rampCancelled = true
+        if (settings.training != requested.training) {
+            rampCancelled = false
+            rampBpm = active.bpm
+            nextRampFrame = exactFrame + settings.training.intervalSeconds.toDouble() * sampleRate
+        }
+        requested = settings.snapshot()
+        requestedPattern = snapshotPattern(settings.bars.takeIf { it.isNotEmpty() })
+    }
+    @Synchronized fun cancelTempoRamp() { rampCancelled = true }
 
     /** Atomically replaces the structure at the next loop; null returns to a single settings bar. */
     @Synchronized fun submitPattern(pattern: List<PatternBar>?) {
@@ -62,6 +80,9 @@ class PcmRenderer(val sampleRate: Int, initialSettings: Settings = Settings(),
         pattern = requestedPattern; patternBarIndex = -1; loopIndex = -1
         earliestSupportedFrame = 0
         events.clear(); segments.clear(); voices.clear()
+        silentBars = 0; barMuted = false; pulseMuted = false; rampCancelled = false
+        rampBpm = if (active.training.ramp) active.training.startBpm else active.bpm
+        nextRampFrame = active.training.intervalSeconds.toDouble() * sampleRate
     }
 
     @Synchronized fun render(destination: FloatArray, offset: Int = 0,
@@ -77,8 +98,9 @@ class PcmRenderer(val sampleRate: Int, initialSettings: Settings = Settings(),
             exactFrame = targetFrame; q = target
             var boundary = false
             if (abs(q - nextPulse) < EPS) {
-                active = active.copy(bpm = requested.bpm, reference = requested.reference)
+                active = active.copy(bpm = if (requested.training.ramp && !rampCancelled) rampBpm else requested.bpm, reference = requested.reference)
                 pulseStart = q; pulseIndex++; nextPulse = q + active.reference
+                pulseMuted = requested.training.omission == Omission.BEATS && random.nextInt(100) < requested.training.probability
                 boundary = true
             }
             if (abs(q - nextBar) < EPS) {
@@ -87,21 +109,32 @@ class PcmRenderer(val sampleRate: Int, initialSettings: Settings = Settings(),
                     pattern = requestedPattern; patternBarIndex = 0; loopIndex++
                 } else patternBarIndex++
                 val definition = pattern?.get(patternBarIndex)
-                active = requested.copy(bpm = active.bpm, reference = active.reference,
-                    meter = definition?.meter ?: requested.meter,
-                    beats = definition?.beats ?: requested.beats).snapshot()
+                active = (definition?.applyTo(requested) ?: requested).copy(
+                    bpm = active.bpm, reference = active.reference).snapshot()
                 barStart = q; barIndex++; nextBar = q + active.meter.quarters
+                val training = requested.training
+                if (training.ramp && !rampCancelled && exactFrame + EPS >= nextRampFrame) {
+                    rampBpm = (rampBpm + training.step).coerceAtMost(training.targetBpm)
+                    active = active.copy(bpm = rampBpm)
+                    nextRampFrame = exactFrame + training.intervalSeconds.toDouble() * sampleRate
+                }
+                barMuted = training.omission == Omission.BARS && silentBars < training.maxSilentBars && random.nextInt(100) < training.probability
+                silentBars = if (barMuted) silentBars + 1 else 0
                 grid = buildGrid(active); gridIndex = 0; boundary = true
             }
             if (boundary) segments.add(Segment(exactFrame, q, barStart, barIndex,
-                pulseStart, pulseIndex, active, patternBarIndex, loopIndex))
+                pulseStart, pulseIndex, active, patternBarIndex, loopIndex,
+                barMuted || (pulseMuted && q - barStart >= active.meter.beatQuarters - EPS)))
             val point = grid.getOrNull(gridIndex)
             if (point != null && abs(barStart + point.first - q) < EPS) {
                 val frame = exactFrame.roundToLong()
                 val beat = floor((q - barStart) / active.meter.beatQuarters + EPS).toInt()
                 val event = ClickEvent(frame, q, barIndex, beat, point.second, active.sound)
-                events.add(event)
-                voices.add(Voice(frame, soundBank.samples(active.sound, active.pitchFor(), point.second)))
+                val protectedOne = q - barStart < active.meter.beatQuarters - EPS
+                if (!barMuted && !(pulseMuted && !protectedOne)) {
+                    events.add(event)
+                    voices.add(Voice(frame, soundBank.samples(active.sound, active.pitchFor(), point.second)))
+                }
                 gridIndex++
             }
         }
@@ -139,7 +172,7 @@ class PcmRenderer(val sampleRate: Int, initialSettings: Settings = Settings(),
         val pulse = (position - s.pulseStart) / s.settings.reference
         return MusicalPosition(frame, position, s.bar, floor(beat + EPS).toInt()
             .coerceIn(0, s.settings.meter.numerator - 1), beat.mod(1.0),
-            s.pulse, pulse.coerceIn(0.0, 1.0), s.settings, s.patternBar, s.loop)
+            s.pulse, pulse.coerceIn(0.0, 1.0), s.settings, s.patternBar, s.loop, s.muted)
     }
 
     private fun framesPerQuarter(s: Settings) = sampleRate * 60.0 / (s.bpm * s.reference)
