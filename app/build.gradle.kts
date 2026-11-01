@@ -7,8 +7,9 @@ plugins {
 android {
     namespace = "de.takt"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
     defaultConfig {
-        applicationId = "de.takt"
+        applicationId = "io.github.chubacca_dev.taceto"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
@@ -16,6 +17,12 @@ android {
     }
     buildFeatures { compose = true }
     bundle { language { enableSplit = false } }
+    buildTypes {
+        release {
+            // Sources are published as a separate snapshot; never embed private VCS data.
+            vcsInfo { include = false }
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

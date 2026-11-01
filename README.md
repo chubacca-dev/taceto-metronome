@@ -17,6 +17,53 @@ Debug APK: `app/build/outputs/apk/debug/app-debug.apk`.
 An unsigned release APK can be built with `./gradlew :app:assembleRelease`.
 Distribution requires a signing configuration and a securely stored signing key.
 
+The application ID is `io.github.chubacca_dev.taceto`. The Kotlin namespace remains
+`de.takt`; the launcher component is `io.github.chubacca_dev.taceto/de.takt.MainActivity`.
+
+### Release signing
+
+Create the signing key once, outside all source repositories:
+
+```sh
+python3 tools/release.py create-key \
+  --keystore "$HOME/.local/share/taceto/signing/taceto-release.p12"
+```
+
+The password is entered interactively and is not saved by the script. Keep the
+key file and a separate password backup: future updates need this same identity.
+Neither belongs in source control or a public release.
+
+Build an unsigned APK with `./gradlew :app:assembleRelease`, then sign it:
+
+```sh
+python3 tools/release.py sign \
+  --keystore "$HOME/.local/share/taceto/signing/taceto-release.p12" \
+  --apk app/build/outputs/apk/release/app-release-unsigned.apk \
+  --output app/build/outputs/apk/release/taceto-0.1.0.apk \
+  --apksigner "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+```
+
+Install Android build-tools 34.0.0 for the signing command; building uses pinned
+build-tools 35.0.0. The separate signer version is chosen for compatibility with
+F-Droid signature-copying tools. The script verifies the signed APK and prints
+its SHA-256 and public certificate details. APKs use v2/v3 signatures (minSdk 26).
+Existing keys and output APKs are never overwritten.
+
+The official release certificate SHA-256 fingerprint is:
+
+```text
+c1fbe74397d10bcbe3515e60f61c99dc7c37bb15d6b3852d8cbeac3db1f8f44d
+```
+
+Verify downloaded APKs with `apksigner verify --verbose --print-certs <file.apk>`
+and compare the signer certificate fingerprint, not just the application name.
+
+Release APKs omit automatically generated VCS metadata, so builds from the
+public source snapshot do not depend on an unrelated development repository.
+F-Droid distribution with the same developer signature requires verification
+against the F-Droid build environment; a local repeat-build check alone is not
+sufficient.
+
 ## Languages
 
 The app includes English (default/fallback) and German. Language can follow the
