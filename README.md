@@ -4,6 +4,14 @@ Native Android metronome built with Kotlin and Jetpack Compose. Requires Android
 8.0 (API 26) or later. Audio events are scheduled in a PCM stream; visualization
 follows the audio playback position.
 
+## Screenshots
+
+| Circle | Pendulum | Meter & beats |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/circle.png" alt="Taceto circular hand view with 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/pendulum.png" alt="Taceto pendulum view with 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/meter.png" alt="Time signature dialog with 6/8 selected, BPM reference, subdivision and swing controls" width="230"> |
+
+Screenshots show the English interface. German is also included.
+
 ## Build
 
 Install OpenJDK 17 and the Android SDK (platform 35 and matching build tools).
