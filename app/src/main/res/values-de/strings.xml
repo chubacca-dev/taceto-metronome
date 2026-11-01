@@ -1,4 +1,5 @@
 <resources>
+    <string name="metronome_stopped">Metronom gestoppt</string>
     <string name="app_name">Taceto Metronome</string>
     <string name="settings">Einstellungen</string>
     <string name="help">Hilfe</string>

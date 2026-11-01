@@ -47,7 +47,7 @@ Build an unsigned APK with `./gradlew :app:assembleRelease`, then sign it:
 python3 tools/release.py sign \
   --keystore "$HOME/.local/share/taceto/signing/taceto-release.p12" \
   --apk app/build/outputs/apk/release/app-release-unsigned.apk \
-  --output app/build/outputs/apk/release/taceto-0.1.0.apk \
+  --output app/build/outputs/apk/release/taceto-0.1.1.apk \
   --apksigner "$ANDROID_HOME/build-tools/34.0.0/apksigner"
 ```
 
@@ -71,6 +71,17 @@ public source snapshot do not depend on an unrelated development repository.
 F-Droid distribution with the same developer signature requires verification
 against the F-Droid build environment; a local repeat-build check alone is not
 sufficient.
+
+## Lock-screen controls
+
+Start the metronome once in the app to make Android's media controls available.
+You can then stop and restart it from the lock screen or media notification.
+Stopping resets to the beginning; the next start does not resume mid-bar.
+Audio focus and the playback wake lock are released while stopped.
+
+Availability and layout depend on Android and your lock-screen settings. Controls
+are not guaranteed to remain available after Android terminates the app or the
+device restarts.
 
 ## Languages
 

@@ -78,8 +78,10 @@ object MetronomeController {
     fun stop(context: Context) = serialized {
         startRequested = false
         commandId++
-        stopEngine()
-        context.applicationContext.stopService(Intent(context, MetronomeService::class.java))
+        if (!MetronomeService.stopActiveSession()) {
+            stopEngine()
+            context.applicationContext.stopService(Intent(context, MetronomeService::class.java))
+        }
     }
 
     fun preview(context: Context, sound: Sound) = serialized {

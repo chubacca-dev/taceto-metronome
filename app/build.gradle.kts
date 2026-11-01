@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.chubacca_dev.taceto"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
     }
     buildFeatures { compose = true }
     bundle { language { enableSplit = false } }
