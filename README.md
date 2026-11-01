@@ -4,6 +4,30 @@ Native Android metronome built with Kotlin and Jetpack Compose. Requires Android
 8.0 (API 26) or later. Audio events are scheduled in a PCM stream; visualization
 follows the audio playback position.
 
+## Features
+
+- Circle and pendulum views with a large beat light; tempo input, swipe, +/- and
+  tap tempo. Manual tempo changes respond immediately during playback.
+- Named, locally saved multi-bar patterns with mixed time signatures. Bars wrap
+  into rows with at most two bars per row; each beat cycles on, accented and off.
+  Select a bar to duplicate, move or delete it; its gear opens the meter,
+  subdivision and swing settings. The BPM reference applies to the whole pattern.
+- Eighth- and sixteenth-note subdivisions, adjustable swing and drawn note symbols.
+  Pattern default tempo is stored separately from the current practice tempo.
+- Optional random beat omissions (protecting the first count) or whole-bar
+  omissions with a limit on consecutive silent bars. Visual assistance can be
+  disabled. Deliberately muted pattern beats stay muted.
+- Optional automatic tempo increases with a starting tempo, step, interval and
+  target. A duration preview accounts for bar boundaries and mixed meters.
+  Playback continues at the target; stopping resets the run. Manual tempo input
+  cancels automatic increases for that run.
+- Six bundled sounds, pitch controls for tonal sounds, three accent colours,
+  English/German interfaces, and lock-screen transport controls with app artwork.
+
+Tap the beat chain to open the pattern/training editor. Saving and loading show
+a confirmation with the pattern name; loading opens a separate selection dialog.
+A dumbbell in the main header indicates enabled training options and opens them.
+
 ## Screenshots
 
 | Circle | Pendulum | Meter & beats |
@@ -11,6 +35,8 @@ follows the audio playback position.
 | <img src="docs/screenshots/circle.png" alt="Taceto circular hand view with 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/pendulum.png" alt="Taceto pendulum view with 120 BPM and tap tempo" width="230"> | <img src="docs/screenshots/meter.png" alt="Time signature dialog with 6/8 selected, BPM reference, subdivision and swing controls" width="230"> |
 
 Screenshots show the English interface. German is also included.
+These screenshots illustrate the base metronome; the current editor also includes
+the pattern and training features described above.
 
 ## Build
 
@@ -82,6 +108,24 @@ Audio focus and the playback wake lock are released while stopped.
 Availability and layout depend on Android and your lock-screen settings. Controls
 are not guaranteed to remain available after Android terminates the app or the
 device restarts.
+
+## Audio timing and calibration
+
+The sound bank is prepared in the background. Playback uses a fixed 40 ms silent
+preroll before musical frame zero; device and output-route latency add to this.
+There is no fast-start switch.
+
+Bluetooth headphones can add delay beyond the position reported by Android.
+Settings provides a manual **Picture delay** adjustment from 0 to 1000 ms. If the
+beat light leads the heard click, increase this value. It changes the displayed
+position only, not the audio stream or tempo. The preference is global: reset it
+when changing output devices. Variable Bluetooth latency cannot be eliminated
+with a fixed display offset.
+
+TAP estimates BPM from up to six taps (five intervals), restarting after a gap
+longer than 2.5 seconds. It sets tempo, not the beat phase of an external song.
+Swing note-pair graphics are long-short motifs; the numeric swing percentage
+determines the actual timing.
 
 ## Languages
 
